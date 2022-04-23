@@ -6,6 +6,7 @@ from rich import print
 from pydantic import BaseModel
 import httpx
 import asyncio
+import sys
 
 
 class Beatmap(BaseModel):
@@ -41,6 +42,7 @@ class QueryMaps(BaseModel):
     result_count: int
     beatmaps: List[Beatmap] = []
 
+downloaded_count = 0
 console = Console()
 query_url = "https://osusearch.com/query/?statuses=Unranked&modes=Standard&min_length=90&star=(5.00,10.00)&premium_mappers=true&offset={}"
 cookies: httpx.Cookies = None
@@ -77,16 +79,22 @@ def fixedfilename(filename: str):
         .replace('/', '_') \
         .replace('\\', '_') \
         .replace(':', '_') \
+        .replace('*', '_') \
         .replace('?', '_') \
         .replace('"', '_') \
         .replace('|', '_')
 
 async def download_map(client: httpx.AsyncClient, progress: Progress, save_path: str, setid):
-    global cookies
+    global cookies, downloaded_count
     headers = httpx.Headers()
     headers['Referer'] = 'https://osu.ppy.sh/'
     async with client.stream('GET', f"https://osu.ppy.sh/beatmapsets/{setid}/download", cookies=cookies, headers=headers, follow_redirects=True) as response:
-        cookies = response.cookies
+        if response.status_code == 429:
+            console.print("[red]429 Too Many Requests")
+            raise Exception("429 Too Many Requests")
+        elif response.status_code == 404:
+            return
+
         total = int(response.headers["Content-Length"])
         filename = response.headers["Content-Disposition"].removeprefix("attachment;filename=\"").removesuffix("\";")
         filename = fixedfilename(filename)
@@ -98,6 +106,7 @@ async def download_map(client: httpx.AsyncClient, progress: Progress, save_path:
         file.close()
         progress.update(download_task, visible=False)
         progress.log(filename+" 下載完成!")
+        downloaded_count += 1
 
 
 def logout():
@@ -106,11 +115,14 @@ def logout():
     headers['Referer'] = 'https://osu.ppy.sh/'
     httpx.delete("https://osu.ppy.sh/session")
 
-async def main():
+async def main(offset=0, *args):
     http_client = httpx.AsyncClient()
     running = True
-    offset = 0
-    batch = 5
+    batch = 3
+
+    if offset:
+        console.print(f"{offset=}")
+        offset = int(offset)
 
     username = input("Username: ")
     password = input("Password: ")
@@ -140,21 +152,25 @@ async def main():
                 if len(maps_data.beatmaps):
                     offset += 1
                 else:
+                    console.log("已經沒有圖了!")
                     running = False
         except KeyboardInterrupt:
             console.print("等待http_client停止")
             await http_client.aclose()
             console.print("登出中...")
             console.logout()
-
+        finally:
+            return offset
 
 
 if __name__ == "__main__":
     try:
         loop = asyncio.get_event_loop()
-        loop.run_until_complete(main())
-    except Exception:
+        offset = loop.run_until_complete(main(*sys.argv[1:]))
+    except Exception as e:
         console.print_exception(show_locals=True)
         if cookies:
             console.print("登出中...")
             logout()
+    console.print(f"程式已結束，總計下載 {downloaded_count} 張圖。")
+    console.print(f"{offset=}")
